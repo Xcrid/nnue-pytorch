@@ -19,7 +19,7 @@ class NNUE(pl.LightningModule):
 
   It is not ideal for training a Pytorch quantized model directly.
   """
-  def __init__(self, feature_set, learning_rate=1e-3, lambda_=1.0):
+  def __init__(self, feature_set, lambda_=1.0, learning_rate=1e-3):
     super(NNUE, self).__init__()
     self.input = nn.Linear(feature_set.num_features, L1)
     self.feature_set = feature_set

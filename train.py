@@ -65,7 +65,7 @@ def main():
     feature_set = features.get_feature_set_from_name(args.features)
 
     if args.resume_from_model is None:
-        nnue = M.NNUE(feature_set=feature_set, lambda_=args.lambda_)
+        nnue = M.NNUE(feature_set=feature_set, lambda_=args.lambda_, learning_rate=1e-3)
     else:
         nnue = torch.load(args.resume_from_model)
         nnue.set_feature_set(feature_set)
