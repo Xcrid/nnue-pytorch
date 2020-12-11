@@ -98,7 +98,8 @@ def main():
     tb_logger = pl_loggers.TensorBoardLogger(logdir)
     checkpoint_callback = pl.callbacks.ModelCheckpoint(save_last=True)
     accumulator = pl.callbacks.GradientAccumulationScheduler(scheduling={5: 3, 12: 8, 20: 20})
-    trainer = pl.Trainer(deterministic=True).from_argparse_args(args, callbacks=[checkpoint_callback, accumulator], logger=tb_logger)
+    trainer = pl.Trainer(deterministic=True).from_argparse_args(args, callbacks=[checkpoint_callback,
+                                                                                 accumulator], logger=tb_logger)
 
     main_device = trainer.root_device if trainer.root_gpu is None else 'cuda:' + str(trainer.root_gpu)
 
