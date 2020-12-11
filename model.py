@@ -19,7 +19,7 @@ class NNUE(pl.LightningModule):
 
   It is not ideal for training a Pytorch quantized model directly.
   """
-  def __init__(self, feature_set, lambda_=1.0):
+  def __init__(self, feature_set, learning_rate=1e-3, lambda_=1.0):
     super(NNUE, self).__init__()
     self.input = nn.Linear(feature_set.num_features, L1)
     self.feature_set = feature_set
@@ -27,6 +27,7 @@ class NNUE(pl.LightningModule):
     self.l2 = nn.Linear(L2, L3)
     self.output = nn.Linear(L3, 1)
     self.lambda_ = lambda_
+    self.learning_rate = learning_rate
 
     self._zero_virtual_feature_weights()
 
@@ -127,5 +128,5 @@ class NNUE(pl.LightningModule):
     self.step_(batch, batch_idx, 'test_loss')
 
   def configure_optimizers(self):
-    optimizer = ranger_adabelief.RangerAdaBelief(self.parameters(), lr=1e-3, eps=1e-12, betas=(0.9,0.999), weight_decay=5e-4)
+    optimizer = ranger_adabelief.RangerAdaBelief(self.parameters(), lr=self.learning_rate, eps=1e-12, betas=(0.9,0.999), weight_decay=5e-4)
     return optimizer
