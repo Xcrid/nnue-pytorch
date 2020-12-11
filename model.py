@@ -1,5 +1,6 @@
 import chess
 import ranger_adabelief
+import ranger
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -128,5 +129,6 @@ class NNUE(pl.LightningModule):
     self.step_(batch, batch_idx, 'test_loss')
 
   def configure_optimizers(self):
-    optimizer = ranger_adabelief.RangerAdaBelief(self.parameters(), lr=self.learning_rate, eps=1e-12, betas=(0.9,0.999), weight_decay=5e-4)
+    #optimizer = ranger.Ranger(self.parameters())
+    optimizer = ranger_adabelief.RangerAdaBelief(self.parameters(), lr=self.learning_rate, eps=1e-12, betas=(0.9, 0.999))
     return optimizer
