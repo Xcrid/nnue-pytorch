@@ -39,6 +39,8 @@ def main():
     parser.add_argument("train", help="Training data (.bin or .binpack)")
     parser.add_argument("val", help="Validation data (.bin or .binpack)")
     parser = pl.Trainer.add_argparse_args(parser)
+
+    parser.add_argument("--deterministic", action="store_false", help="make trainer deterministic (default=True)")
     parser.add_argument("--tune", action="store_true", help="automated LR search")
     parser.add_argument("--py-data", action="store_true", help="Use python data loader (default=False)")
     parser.add_argument("--lambda", default=1.0, type=float, dest='lambda_',
@@ -96,7 +98,8 @@ def main():
 
     tb_logger = pl_loggers.TensorBoardLogger(logdir)
     checkpoint_callback = pl.callbacks.ModelCheckpoint(save_last=True)
-    trainer = pl.Trainer.from_argparse_args(args, callbacks=[checkpoint_callback], logger=tb_logger)
+    accumulator = pl.callbacks.GradientAccumulationScheduler(scheduling={5: 3, 12: 8, 20: 20})
+    trainer = pl.Trainer.from_argparse_args(args, callbacks=[checkpoint_callback, accumulator], logger=tb_logger)
 
     main_device = trainer.root_device if trainer.root_gpu is None else 'cuda:' + str(trainer.root_gpu)
 
