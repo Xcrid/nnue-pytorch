@@ -40,7 +40,6 @@ def main():
     parser.add_argument("val", help="Validation data (.bin or .binpack)")
     parser = pl.Trainer.add_argparse_args(parser)
 
-    parser.add_argument("--deterministic", action="store_false", help="make trainer deterministic (default=True)")
     parser.add_argument("--tune", action="store_true", help="automated LR search")
     parser.add_argument("--py-data", action="store_true", help="Use python data loader (default=False)")
     parser.add_argument("--lambda", default=1.0, type=float, dest='lambda_',
@@ -99,7 +98,7 @@ def main():
     tb_logger = pl_loggers.TensorBoardLogger(logdir)
     checkpoint_callback = pl.callbacks.ModelCheckpoint(save_last=True)
     accumulator = pl.callbacks.GradientAccumulationScheduler(scheduling={5: 3, 12: 8, 20: 20})
-    trainer = pl.Trainer.from_argparse_args(args, callbacks=[checkpoint_callback, accumulator], logger=tb_logger)
+    trainer = pl.Trainer(deterministic=True).from_argparse_args(args, callbacks=[checkpoint_callback, accumulator], logger=tb_logger)
 
     main_device = trainer.root_device if trainer.root_gpu is None else 'cuda:' + str(trainer.root_gpu)
 
@@ -112,6 +111,7 @@ def main():
                                     args.smart_fen_skipping, args.random_fen_skipping, main_device)
 
     if args.tune:
+        print("tuning...")
         train_tune, val_tune = data_loader_cc(args.train, args.val, feature_set, args.num_workers, batch_size,
                                     args.smart_fen_skipping, args.random_fen_skipping, main_device, epoch_size=2000000)
         lr_finder = trainer.tuner.lr_find(nnue, train_tune, val_tune, min_lr=1e-05, max_lr=1e-01)
