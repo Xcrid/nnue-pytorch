@@ -61,20 +61,6 @@ def main():
     features.add_argparse_args(parser)
     args = parser.parse_args()
 
-    feature_set = features.get_feature_set_from_name(args.features)
-
-    if args.resume_from_model is None:
-        nnue = M.NNUE(feature_set=feature_set, lambda_=args.lambda_, learning_rate=1e-3)
-    else:
-        nnue = torch.load(args.resume_from_model)
-        nnue.set_feature_set(feature_set)
-        nnue.lambda_ = args.lambda_
-
-    print("Feature set: {}".format(feature_set.name))
-    print("Num real features: {}".format(feature_set.num_real_features))
-    print("Num virtual features: {}".format(feature_set.num_virtual_features))
-    print("Num features: {}".format(feature_set.num_features))
-
     print("Training with {} validating with {}".format(args.train, args.val))
 
     pl.seed_everything(args.seed)
@@ -92,35 +78,51 @@ def main():
         print('limiting torch to {} threads.'.format(args.threads))
         t_set_num_threads(args.threads)
 
+    feature_set = features.get_feature_set_from_name(args.features)
+
+    if args.py_data:
+        print('Using python data loader')
+        train, val = data_loader_py(args.train, args.val, batch_size, 'cuda:0')
+
+    else:
+        print('Using c++ data loader')
+        train, val = data_loader_cc(args.train, args.val, feature_set, args.num_workers, batch_size,
+                                    args.smart_fen_skipping, args.random_fen_skipping, 'cuda:0')
+    length = len(train)
+    print(length)
+
+
+
+    if args.resume_from_model is None:
+        nnue = M.NNUE(feature_set=feature_set, lambda_=args.lambda_, learning_rate=0.6, batch_per_epoch=length)
+    else:
+        nnue = torch.load(args.resume_from_model)
+        nnue.set_feature_set(feature_set)
+        nnue.lambda_ = args.lambda_
+
+    print("Feature set: {}".format(feature_set.name))
+    print("Num real features: {}".format(feature_set.num_real_features))
+    print("Num virtual features: {}".format(feature_set.num_virtual_features))
+    print("Num features: {}".format(feature_set.num_features))
     logdir = args.default_root_dir if args.default_root_dir else 'logs/'
     print('Using log dir {}'.format(logdir), flush=True)
 
     tb_logger = pl_loggers.TensorBoardLogger(logdir)
     checkpoint_callback = pl.callbacks.ModelCheckpoint(save_last=True)
-    accumulator = pl.callbacks.GradientAccumulationScheduler(scheduling={5: 3, 12: 8, 20: 20})
-    trainer = pl.Trainer(deterministic=True).from_argparse_args(args, callbacks=[checkpoint_callback,
-                                                                                 accumulator], logger=tb_logger)
+    lr_monitor = pl.callbacks.LearningRateMonitor(logging_interval='epoch')
+    trainer = pl.Trainer(deterministic=True, gradient_clip_val=0.5).from_argparse_args(args,
+                                                        callbacks=[checkpoint_callback, lr_monitor], logger=tb_logger)
 
-    main_device = trainer.root_device if trainer.root_gpu is None else 'cuda:' + str(trainer.root_gpu)
 
-    if args.py_data:
-        print('Using python data loader')
-        train, val = data_loader_py(args.train, args.val, batch_size, main_device)
-    else:
-        print('Using c++ data loader')
-        train, val = data_loader_cc(args.train, args.val, feature_set, args.num_workers, batch_size,
-                                    args.smart_fen_skipping, args.random_fen_skipping, main_device)
 
     if args.tune:
         print("tuning...")
-        train_tune, val_tune = data_loader_cc(args.train, args.val, feature_set, args.num_workers, batch_size,
-                                    args.smart_fen_skipping, args.random_fen_skipping, main_device, epoch_size=2000000)
-        lr_finder = trainer.tuner.lr_find(nnue, train_tune, val_tune, min_lr=1e-05, max_lr=1e-01)
-        new_lr = lr_finder.suggestion()
-        print("tuned_lr" + new_lr)
-        nnue.hparams.learning_rate = new_lr
+        lr_finder = trainer.tuner.lr_find(nnue, train, val, min_lr=0.001, max_lr=0.7, num_training=1000)
+        new_lr = str(lr_finder.suggestion())
+        print("tuned_lr = " + new_lr)
 
-    trainer.fit(nnue, train, val)
+    else :
+        trainer.fit(nnue, train, val)
 
 
 if __name__ == '__main__':

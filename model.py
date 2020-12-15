@@ -1,6 +1,8 @@
 import chess
 import ranger_adabelief
 import ranger
+from Lookahead import SGD, GradualWarmupScheduler
+from torch.optim.lr_scheduler import OneCycleLR, ReduceLROnPlateau
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -20,7 +22,7 @@ class NNUE(pl.LightningModule):
 
   It is not ideal for training a Pytorch quantized model directly.
   """
-  def __init__(self, feature_set, lambda_=1.0, learning_rate=1e-3):
+  def __init__(self, feature_set, lambda_=1.0, learning_rate=1e-3, batch_per_epoch=None):
     super(NNUE, self).__init__()
     self.input = nn.Linear(feature_set.num_features, L1)
     self.feature_set = feature_set
@@ -28,7 +30,8 @@ class NNUE(pl.LightningModule):
     self.l2 = nn.Linear(L2, L3)
     self.output = nn.Linear(L3, 1)
     self.lambda_ = lambda_
-    self.learning_rate = learning_rate
+    self.hparams.learning_rate = learning_rate
+    self.batch_per_epoch = batch_per_epoch
 
     self._zero_virtual_feature_weights()
 
@@ -98,7 +101,6 @@ class NNUE(pl.LightningModule):
 
   def step_(self, batch, batch_idx, loss_type):
     us, them, white, black, outcome, score = batch
-
     q = self(us, them, white, black)
     t = outcome
     # Divide score by 600.0 to match the expected NNUE scaling factor
@@ -111,8 +113,8 @@ class NNUE(pl.LightningModule):
     result  = self.lambda_ * teacher_loss    + (1.0 - self.lambda_) * outcome_loss
     entropy = self.lambda_ * teacher_entropy + (1.0 - self.lambda_) * outcome_entropy
     loss = result.mean() - entropy.mean()
-    self.log(loss_type, loss)
     return loss
+
 
     # MSE Loss function for debugging
     # Scale score by 600.0 to match the expected NNUE scaling factor
@@ -120,15 +122,33 @@ class NNUE(pl.LightningModule):
     # loss = F.mse_loss(output, score)
 
   def training_step(self, batch, batch_idx):
-    return self.step_(batch, batch_idx, 'train_loss')
+    loss = self.step_(batch, batch_idx, 'train_loss')
+    self.log('train_loss',loss)
+    return loss
 
   def validation_step(self, batch, batch_idx):
-    self.step_(batch, batch_idx, 'val_loss')
+    loss = self.step_(batch, batch_idx, 'val_loss')
+    self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
+    return loss
 
   def test_step(self, batch, batch_idx):
-    self.step_(batch, batch_idx, 'test_loss')
+    return self.step_(batch, batch_idx, 'test_loss')
 
   def configure_optimizers(self):
     #optimizer = ranger.Ranger(self.parameters())
-    optimizer = ranger_adabelief.RangerAdaBelief(self.parameters(), lr=self.learning_rate, eps=1e-12, betas=(0.9, 0.999))
-    return optimizer
+    #optimizer = ranger_adabelief.RangerAdaBelief(self.parameters(), lr=self.learning_rate, eps=1e-12, betas=(0.9, 0.999))
+    optimizer = SGD(self.parameters(), lr=self.hparams.learning_rate, momentum=0.9, weight_decay=0,
+                    use_gc=True, k=5, alpha=0.5)
+    scheduler = OneCycleLR(optimizer, max_lr=0.6, steps_per_epoch=self.batch_per_epoch, epochs=50)
+
+    #lr_scheduler = ReduceLROnPlateau(optimizer, patience=3, verbose=True)
+
+    #scheduler = {
+    #  'scheduler': lr_scheduler,
+    #  'reduce_on_plateau': True,
+    #  # val_checkpoint_on is val_loss passed in as checkpoint_on
+    #  'monitor': 'val_loss'
+    #}
+
+
+    return [optimizer], [scheduler]
