@@ -23,7 +23,7 @@ class NNUE(pl.LightningModule):
 
   It is not ideal for training a Pytorch quantized model directly.
   """
-  def __init__(self, feature_set, lambda_=1.0, learning_rate=1e-3, batch_per_epoch=None):
+  def __init__(self, feature_set, lambda_=1.0, learning_rate=1e-3, batch_per_epoch=None, config=None):
     super(NNUE, self).__init__()
     self.input = nn.Linear(feature_set.num_features, L1)
     self.feature_set = feature_set
@@ -31,8 +31,16 @@ class NNUE(pl.LightningModule):
     self.l2 = nn.Linear(L2, L3)
     self.output = nn.Linear(L3, 1)
     self.lambda_ = lambda_
+
+    self.eps = 1e-16
+    self.weight_decay = 0
     self.hparams.learning_rate = learning_rate
     self.batch_per_epoch = batch_per_epoch
+
+    if config is not None:
+      self.eps = config["eps"]
+      self.weight_decay = config["weight_decay"]
+      self.hparams.learning_rate = config["lr"]
 
     self._zero_virtual_feature_weights()
 
@@ -130,7 +138,11 @@ class NNUE(pl.LightningModule):
   def validation_step(self, batch, batch_idx):
     loss = self.step_(batch, batch_idx, 'val_loss')
     self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
-    return loss
+    return {"val_loss": loss}
+
+  def validation_epoch_end(self, outputs):
+    avg_loss = torch.stack([x["val_loss"] for x in outputs]).mean()
+    self.log("ptl/val_loss", avg_loss)
 
   def test_step(self, batch, batch_idx):
     return self.step_(batch, batch_idx, 'test_loss')

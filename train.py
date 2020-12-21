@@ -9,6 +9,16 @@ from torch import set_num_threads as t_set_num_threads
 from pytorch_lightning import loggers as pl_loggers
 from torch.utils.data import DataLoader, Dataset
 
+#for automated tuning
+import shutil
+import tempfile
+from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.utilities.cloud_io import load as pl_load
+from ray import tune
+from ray.tune import CLIReporter
+from ray.tune.schedulers import ASHAScheduler, PopulationBasedTraining
+from ray.tune.integration.pytorch_lightning import TuneReportCallback, TuneReportCheckpointCallback
+
 
 def data_loader_cc(train_filename, val_filename, feature_set, num_workers, batch_size, filtered, random_fen_skipping,
                    main_device, epoch_size=100000000, val_size=8000000):
@@ -28,11 +38,31 @@ def data_loader_cc(train_filename, val_filename, feature_set, num_workers, batch
     return train, val
 
 
-def data_loader_py(train_filename, val_filename, batch_size, main_device):
-    train = DataLoader(nnue_bin_dataset.NNUEBinData(train_filename), batch_size=batch_size, shuffle=True, num_workers=4)
-    val = DataLoader(nnue_bin_dataset.NNUEBinData(val_filename), batch_size=32)
+def data_loader_py(train_filename, val_filename, batch_size, feature_set, main_device):
+    train = DataLoader(nnue_bin_dataset.NNUEBinData(train_filename, feature_set), batch_size=batch_size, shuffle=True, num_workers=4)
+    val = DataLoader(nnue_bin_dataset.NNUEBinData(val_filename, feature_set), batch_size=32)
     return train, val
 
+
+def train_tune_nnue(config, feature_set=None, train_dataset=None, val_dataset=None,
+                    args=None, num_epochs=10, num_gpus=0):
+
+    nnue = M.NNUE(config=config, feature_set=feature_set, lambda_=args.lambda_, learning_rate=0.001,
+                  batch_per_epoch=len(train_dataset))
+
+    trainer = pl.Trainer(
+        deterministic=True,
+        gradient_clip_val=0.5,
+        max_epochs=num_epochs,
+        gpus=num_gpus,
+        progress_bar_refresh_rate=0
+    ).from_argparse_args(args, callbacks=[TuneReportCallback({"loss": "plt/val_loss"},on="validation_end")],
+                         logger=TensorBoardLogger(save_dir=tune.get_trial_dir(), name="", version="."))
+
+    trainer.fit(nnue, train_dataset, val_dataset)
+
+# config example to change layer size
+# "layer_2_size": tune.choice([64, 128, 256]),
 
 def main():
     parser = argparse.ArgumentParser(description="Trains the network.")
@@ -82,7 +112,7 @@ def main():
 
     if args.py_data:
         print('Using python data loader')
-        train, val = data_loader_py(args.train, args.val, batch_size, 'cuda:0')
+        train, val = data_loader_py(args.train, args.val, batch_size, feature_set, 'cuda:0')
 
     else:
         print('Using c++ data loader')
@@ -110,18 +140,56 @@ def main():
     tb_logger = pl_loggers.TensorBoardLogger(logdir)
     checkpoint_callback = pl.callbacks.ModelCheckpoint(save_last=True)
     lr_monitor = pl.callbacks.LearningRateMonitor(logging_interval='epoch')
-    trainer = pl.Trainer(deterministic=True, gradient_clip_val=0.5).from_argparse_args(args,
-                                                        callbacks=[checkpoint_callback, lr_monitor], logger=tb_logger)
-
-
 
     if args.tune:
-        print("tuning...")
-        lr_finder = trainer.tuner.lr_find(nnue, train, val, min_lr=0.001, max_lr=0.7, num_training=1000)
-        new_lr = str(lr_finder.suggestion())
-        print("tuned_lr = " + new_lr)
+        num_samples=2
+        num_epochs=2
+        gpus_per_trial=1
 
-    else :
+        config = {
+            "eps": tune.loguniform(1e-18, 1e-13),
+            "weight_decay": tune.loguniform(1e-6, 1e-3),
+            "lr": tune.loguniform(1e-4, 1e-1),
+        }
+
+        scheduler = ASHAScheduler(
+            max_t=num_epochs,
+            grace_period=1,
+            reduction_factor=2)
+
+        reporter = CLIReporter(
+            parameter_columns=["eps", "weight_decay", "lr"],
+            metric_columns=["loss", "training_iteration"])
+
+        analysis = tune.run(
+            tune.with_parameters(
+                train_tune_nnue,
+                feature_set=feature_set,
+                train_dataset=train,
+                val_dataset=val,
+                args=args,
+                num_epochs=num_epochs,
+                num_gpus=gpus_per_trial),
+            resources_per_trial={
+                "cpu": 1,
+                "gpu": gpus_per_trial
+            },
+            metric="loss",
+            mode="min",
+            config=config,
+            num_samples=num_samples,
+            scheduler=scheduler,
+            progress_reporter=reporter,
+            name="tune_nnue")
+
+        print("Best hyperparameters found were: ", analysis.best_config)
+    else:
+
+        trainer = pl.Trainer(deterministic=True, gradient_clip_val=0.5).from_argparse_args(args,
+                                                                                           callbacks=[
+                                                                                               checkpoint_callback,
+                                                                                               lr_monitor],
+                                                                                           logger=tb_logger)
         trainer.fit(nnue, train, val)
 
 
