@@ -60,10 +60,10 @@ class RangerAdaBelief(Optimizer):
 
     def __init__(self, params, lr=1e-3,                       # lr
                  alpha=0.5, k=6, N_sma_threshhold=5,           # Ranger options
-                 betas=(.95, 0.999), eps=1e-5, weight_decay=0,  # Adam options
+                 betas=(.95, 0.999), eps=1e-5, weight_decay=1e-5,  # Adam options
                  # Gradient centralization on or off, applied to conv layers only or conv + fc layers
                  use_gc=True, gc_conv_only=False, gc_loc=True, adabelief = True, weight_decouple = True,
-                 ):
+                 epochs=100, steps_per_epoch=6104):
 
         # parameter checks
         if not 0.0 <= alpha <= 1.0:
@@ -108,6 +108,9 @@ class RangerAdaBelief(Optimizer):
 
         # Turn on decoupled weight decay or not
         self.weight_decouple = weight_decouple
+
+        self.T = epochs * steps_per_epoch
+
 
         print(
             f"Ranger optimizer loaded. \nGradient Centralization usage = {self.use_gc}")
@@ -157,6 +160,8 @@ class RangerAdaBelief(Optimizer):
                     state['exp_avg'] = torch.zeros_like(p_data_fp32)
                     state['exp_avg_sq'] = torch.zeros_like(p_data_fp32)
 
+                    state['previous_grad'] = torch.zeros_like(p.data)
+
                     # look ahead weight storage now in state dict
                     state['slow_buffer'] = torch.empty_like(p.data)
                     state['slow_buffer'].copy_(p.data)
@@ -168,11 +173,11 @@ class RangerAdaBelief(Optimizer):
 
                 # begin computations
                 exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
-                beta1, beta2 = group['betas']
+                beta1_init, beta2 = group['betas']
 
-                # GC operation for Conv layers and FC layers
-                # if grad.dim() > self.gc_gradient_threshold:
-                #    grad.add_(-grad.mean(dim=tuple(range(1, grad.dim())), keepdim=True))
+                temp = 1 - (state['step'] / self.T)
+                beta1 = beta1_init * temp / ((1 - beta1_init) + beta1_init * temp)
+
                 if self.gc_loc:
                     grad = centralized_gradient(grad, use_gc=self.use_gc, gc_conv_only=self.gc_conv_only)
 
@@ -204,10 +209,6 @@ class RangerAdaBelief(Optimizer):
                     else:
                         step_size = 1.0 / (1 - beta1 ** state['step'])
                     buffered[2] = step_size
-
-                # if group['weight_decay'] != 0:
-                #    p_data_fp32.add_(-group['weight_decay']
-                #                     * group['lr'], p_data_fp32)
 
                 # apply lr
                 if N_sma > self.N_sma_threshhold:

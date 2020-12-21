@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader, Dataset
 
 
 def data_loader_cc(train_filename, val_filename, feature_set, num_workers, batch_size, filtered, random_fen_skipping,
-                   main_device, epoch_size=100000000, val_size=1000000):
+                   main_device, epoch_size=100000000, val_size=8000000):
     # Epoch and validation sizes are arbitrary
     features_name = feature_set.name
     train_infinite = nnue_dataset.SparseBatchDataset(features_name, train_filename, batch_size, num_workers=num_workers,
@@ -89,12 +89,12 @@ def main():
         train, val = data_loader_cc(args.train, args.val, feature_set, args.num_workers, batch_size,
                                     args.smart_fen_skipping, args.random_fen_skipping, 'cuda:0')
     length = len(train)
-    print(length)
+    print("size" + str(length))
 
 
 
     if args.resume_from_model is None:
-        nnue = M.NNUE(feature_set=feature_set, lambda_=args.lambda_, learning_rate=0.6, batch_per_epoch=length)
+        nnue = M.NNUE(feature_set=feature_set, lambda_=args.lambda_, learning_rate=0.001, batch_per_epoch=length)
     else:
         nnue = torch.load(args.resume_from_model)
         nnue.set_feature_set(feature_set)

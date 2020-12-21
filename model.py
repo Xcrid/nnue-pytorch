@@ -3,6 +3,7 @@ import ranger_adabelief
 import ranger
 from Lookahead import SGD, GradualWarmupScheduler
 from torch.optim.lr_scheduler import OneCycleLR, ReduceLROnPlateau
+from adabound import AdaBoundW
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -136,19 +137,21 @@ class NNUE(pl.LightningModule):
 
   def configure_optimizers(self):
     #optimizer = ranger.Ranger(self.parameters())
-    #optimizer = ranger_adabelief.RangerAdaBelief(self.parameters(), lr=self.learning_rate, eps=1e-12, betas=(0.9, 0.999))
-    optimizer = SGD(self.parameters(), lr=self.hparams.learning_rate, momentum=0.9, weight_decay=0,
-                    use_gc=True, k=5, alpha=0.5)
-    scheduler = OneCycleLR(optimizer, max_lr=0.6, steps_per_epoch=self.batch_per_epoch, epochs=50)
+    #optimizer = AdaBoundW(self.parameters(), epochs=100, steps_per_epoch=self.batch_per_epoch,
+                          #weight_decay=0)
+    optimizer = ranger_adabelief.RangerAdaBelief(self.parameters(), lr=self.hparams.learning_rate, eps=1e-16, betas=(0.9, 0.999))
+    #optimizer = SGD(self.parameters(), lr=self.hparams.learning_rate, momentum=0.9, weight_decay=0,
+                    #use_gc=True, k=5, alpha=0.5)
+    #scheduler = OneCycleLR(optimizer, max_lr=0.00005, steps_per_epoch=self.batch_per_epoch, epochs=50)
 
-    #lr_scheduler = ReduceLROnPlateau(optimizer, patience=3, verbose=True)
-
-    #scheduler = {
-    #  'scheduler': lr_scheduler,
-    #  'reduce_on_plateau': True,
+    # lr_scheduler = ReduceLROnPlateau(optimizer, factor=0.5, patience=10, verbose=True)
+    #
+    # scheduler = {
+    #   'scheduler': lr_scheduler,
+    #   'reduce_on_plateau': True,
     #  # val_checkpoint_on is val_loss passed in as checkpoint_on
-    #  'monitor': 'val_loss'
-    #}
+    #   'monitor': 'val_loss'
+    # }
 
 
-    return [optimizer], [scheduler]
+    return optimizer#], [scheduler]
