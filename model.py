@@ -151,7 +151,8 @@ class NNUE(pl.LightningModule):
     #optimizer = ranger.Ranger(self.parameters())
     #optimizer = AdaBoundW(self.parameters(), epochs=100, steps_per_epoch=self.batch_per_epoch,
                           #weight_decay=0)
-    optimizer = ranger_adabelief.RangerAdaBelief(self.parameters(), lr=self.hparams.learning_rate, eps=1e-16, betas=(0.9, 0.999))
+    optimizer = ranger_adabelief.RangerAdaBelief(self.parameters(), lr=self.hparams.learning_rate, eps=self.eps,
+                                                 betas=(0.9, 0.999), weight_decay=self.weight_decay)
     #optimizer = SGD(self.parameters(), lr=self.hparams.learning_rate, momentum=0.9, weight_decay=0,
                     #use_gc=True, k=5, alpha=0.5)
     #scheduler = OneCycleLR(optimizer, max_lr=0.00005, steps_per_epoch=self.batch_per_epoch, epochs=50)
