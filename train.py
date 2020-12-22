@@ -1,24 +1,15 @@
 import argparse
-import model as M
+import model_ as M
 import nnue_dataset
 import nnue_bin_dataset
-import pytorch_lightning as pl
 import features
 import torch
+import torch.nn.functional as F
 from torch import set_num_threads as t_set_num_threads
-from pytorch_lightning import loggers as pl_loggers
 from torch.utils.data import DataLoader, Dataset
 
-#for automated tuning
-import shutil
-import tempfile
-from pytorch_lightning.loggers import TensorBoardLogger
-from pytorch_lightning.utilities.cloud_io import load as pl_load
-from ray import tune
-from ray.tune import CLIReporter
-from ray.tune.schedulers import ASHAScheduler, PopulationBasedTraining
-from ray.tune.integration.pytorch_lightning import TuneReportCallback, TuneReportCheckpointCallback
-
+import ranger_adabelief
+from torch.utils.tensorboard import SummaryWriter
 
 def data_loader_cc(train_filename, val_filename, feature_set, num_workers, batch_size, filtered, random_fen_skipping,
                    main_device, epoch_size=100000000, val_size=8000000):
@@ -44,33 +35,29 @@ def data_loader_py(train_filename, val_filename, batch_size, feature_set, main_d
     return train, val
 
 
-def train_tune_nnue(config, feature_set=None, train_dataset=None, val_dataset=None,
-                    args=None, num_epochs=10, num_gpus=0):
+def nnue_loss(q, t, score, lambda_):
 
-    nnue = M.NNUE(config=config, feature_set=feature_set, lambda_=args.lambda_, learning_rate=0.001,
-                  batch_per_epoch=len(train_dataset))
+    p = (score / 600.0).sigmoid()
+    epsilon = 1e-12
+    teacher_entropy = -(p * (p + epsilon).log() + (1.0 - p) * (1.0 - p + epsilon).log())
+    outcome_entropy = -(t * (t + epsilon).log() + (1.0 - t) * (1.0 - t + epsilon).log())
+    teacher_loss = -(p * F.logsigmoid(q) + (1.0 - p) * F.logsigmoid(-q))
+    outcome_loss = -(t * F.logsigmoid(q) + (1.0 - t) * F.logsigmoid(-q))
+    result  = lambda_ * teacher_loss    + (1.0 - lambda_) * outcome_loss
+    entropy = lambda_ * teacher_entropy + (1.0 - lambda_) * outcome_entropy
+    loss = result.mean() - entropy.mean()
+    return loss
 
-    trainer = pl.Trainer(
-        deterministic=True,
-        gradient_clip_val=0.5,
-        max_epochs=num_epochs,
-        gpus=num_gpus,
-        progress_bar_refresh_rate=0
-    ).from_argparse_args(args, callbacks=[TuneReportCallback({"loss": "plt/val_loss"},on="validation_end")],
-                         logger=TensorBoardLogger(save_dir=tune.get_trial_dir(), name="", version="."))
-
-    trainer.fit(nnue, train_dataset, val_dataset)
-
-# config example to change layer size
-# "layer_2_size": tune.choice([64, 128, 256]),
+def save_checkpoint(state, filename="save_test.pth"):
+    torch.save(state, filename)
 
 def main():
     parser = argparse.ArgumentParser(description="Trains the network.")
     parser.add_argument("train", help="Training data (.bin or .binpack)")
     parser.add_argument("val", help="Validation data (.bin or .binpack)")
-    parser = pl.Trainer.add_argparse_args(parser)
 
     parser.add_argument("--tune", action="store_true", help="automated LR search")
+    parser.add_argument("--save", action="store_true", help="save after every training epoch (default = False)")
     parser.add_argument("--py-data", action="store_true", help="Use python data loader (default=False)")
     parser.add_argument("--lambda", default=1.0, type=float, dest='lambda_',
                         help="lambda=1.0 = train on evaluations, lambda=0.0 = train on game results, interpolates between (default=1.0).")
@@ -93,8 +80,10 @@ def main():
 
     print("Training with {} validating with {}".format(args.train, args.val))
 
-    pl.seed_everything(args.seed)
-    print("Seed {}".format(args.seed))
+    torch.manual_seed(123)
+    torch.cuda.manual_seed(123)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
 
     batch_size = args.batch_size
     if batch_size <= 0:
@@ -112,19 +101,15 @@ def main():
 
     if args.py_data:
         print('Using python data loader')
-        train, val = data_loader_py(args.train, args.val, batch_size, feature_set, 'cuda:0')
+        train_data, val_data = data_loader_py(args.train, args.val, batch_size, feature_set, 'cuda:0')
 
     else:
         print('Using c++ data loader')
-        train, val = data_loader_cc(args.train, args.val, feature_set, args.num_workers, batch_size,
+        train_data, val_data = data_loader_cc(args.train, args.val, feature_set, args.num_workers, batch_size,
                                     args.smart_fen_skipping, args.random_fen_skipping, 'cuda:0')
-    length = len(train)
-    print("size" + str(length))
-
-
 
     if args.resume_from_model is None:
-        nnue = M.NNUE(feature_set=feature_set, lambda_=args.lambda_, learning_rate=0.001, batch_per_epoch=length)
+        nnue = M.NNUE(feature_set=feature_set, lambda_=args.lambda_)
     else:
         nnue = torch.load(args.resume_from_model)
         nnue.set_feature_set(feature_set)
@@ -134,64 +119,79 @@ def main():
     print("Num real features: {}".format(feature_set.num_real_features))
     print("Num virtual features: {}".format(feature_set.num_virtual_features))
     print("Num features: {}".format(feature_set.num_features))
-    logdir = args.default_root_dir if args.default_root_dir else 'logs/'
-    print('Using log dir {}'.format(logdir), flush=True)
 
-    tb_logger = pl_loggers.TensorBoardLogger(logdir)
-    checkpoint_callback = pl.callbacks.ModelCheckpoint(save_last=True)
-    lr_monitor = pl.callbacks.LearningRateMonitor(logging_interval='epoch')
+    NUM_EPOCHS = 100
 
-    if args.tune:
-        num_samples=2
-        num_epochs=2
-        gpus_per_trial=1
+    LEARNING_RATE = 1e-3
+    DECAY = 0.0
+    EPS = 1e-16
 
-        config = {
-            "eps": tune.loguniform(1e-18, 1e-13),
-            "weight_decay": tune.loguniform(1e-6, 1e-3),
-            "lr": tune.loguniform(1e-4, 1e-1),
-        }
+    writer = SummaryWriter('runs/nnue_experiment_1')
 
-        scheduler = ASHAScheduler(
-            max_t=num_epochs,
-            grace_period=1,
-            reduction_factor=2)
+    optimizer = ranger_adabelief.RangerAdaBelief(nnue.parameters(), lr=LEARNING_RATE, eps=EPS,
+                                                 betas=(0.9, 0.999), weight_decay=DECAY)
 
-        reporter = CLIReporter(
-            parameter_columns=["eps", "weight_decay", "lr"],
-            metric_columns=["loss", "training_iteration"])
+    nnue = nnue.cuda()
 
-        analysis = tune.run(
-            tune.with_parameters(
-                train_tune_nnue,
-                feature_set=feature_set,
-                train_dataset=train,
-                val_dataset=val,
-                args=args,
-                num_epochs=num_epochs,
-                num_gpus=gpus_per_trial),
-            resources_per_trial={
-                "cpu": 1,
-                "gpu": gpus_per_trial
-            },
-            metric="loss",
-            mode="min",
-            config=config,
-            num_samples=num_samples,
-            scheduler=scheduler,
-            progress_reporter=reporter,
-            name="tune_nnue")
 
-        print("Best hyperparameters found were: ", analysis.best_config)
-    else:
+    for epoch in range(0, NUM_EPOCHS):
 
-        trainer = pl.Trainer(deterministic=True, gradient_clip_val=0.5).from_argparse_args(args,
-                                                                                           callbacks=[
-                                                                                               checkpoint_callback,
-                                                                                               lr_monitor],
-                                                                                           logger=tb_logger)
-        trainer.fit(nnue, train, val)
+        nnue.train()
 
+        train_interval = 1000
+        loss_f_sum_interval = 0.0
+        loss_f_sum_epoch = 0.0
+        loss_v_sum_epoch = 0.0
+
+        for batch_idx, batch in enumerate(train_data):
+            batch = [_data.cuda() for _data in batch]
+            us, them, white, black, outcome, score = batch
+
+            optimizer.zero_grad()
+            output = nnue(us, them, white, black)
+
+            loss = nnue_loss(output, outcome, score, args.lambda_)
+
+            loss.backward()
+            optimizer.step()
+
+            loss_f_sum_interval += loss.float()
+            loss_f_sum_epoch += loss.float()
+
+            if batch_idx % train_interval == train_interval - 1:
+
+                writer.add_scalar('training loss',
+                                  loss_f_sum_interval / 1000,
+                                  epoch * len(train_data) + batch_idx)
+
+                loss_f_sum_interval = 0.0
+
+        print("Epoch #{}\t Train_Loss: {:.8f}\t".format(epoch, loss_f_sum_epoch / len(train_data)))
+
+        if args.save:
+            save_checkpoint({'name': epoch, 'state_dict': model.state_dict(), 'optimizer': optimizer.state_dict()})
+
+        if epoch % 1 == 0 or (epoch + 1) == NUM_EPOCHS:
+
+            with torch.no_grad():
+                nnue.eval()
+                for batch_idx, batch in enumerate(val_data):
+                    batch = [_data.cuda() for _data in batch]
+                    us, them, white, black, outcome, score = batch
+
+                    _output, = nnue(us, them, white, black)
+                    loss_v = nnue_loss(_output, outcome, score, args.lambda_)
+                    loss_v_sum_epoch += loss_v.float()
+
+            writer.add_scalar('validation loss',
+                              loss_v_sum_epoch / len(val_data),
+                              epoch * len(train_data) + batch_idx)
+
+            loss_v_sum_epoch = 0.0
+
+            print("Epoch #{}\tVal_Loss: {:.8f}\t".format(epoch, loss_v_sum_epoch / len(val_data)))
+
+    writer.close()
 
 if __name__ == '__main__':
     main()
