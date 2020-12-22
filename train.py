@@ -187,9 +187,10 @@ def main():
                               loss_v_sum_epoch / len(val_data),
                               epoch * len(train_data) + batch_idx)
 
-            loss_v_sum_epoch = 0.0
+
 
             print("Epoch #{}\tVal_Loss: {:.8f}\t".format(epoch, loss_v_sum_epoch / len(val_data)))
+            loss_v_sum_epoch = 0.0
 
     writer.close()
 
