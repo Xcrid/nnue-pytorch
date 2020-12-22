@@ -138,7 +138,7 @@ def main():
 
         nnue.train()
 
-        train_interval = 1000
+        train_interval = 50
         loss_f_sum_interval = 0.0
         loss_f_sum_epoch = 0.0
         loss_v_sum_epoch = 0.0
@@ -161,7 +161,7 @@ def main():
             if batch_idx % train_interval == train_interval - 1:
 
                 writer.add_scalar('train_loss',
-                                  loss_f_sum_interval / 1000,
+                                  loss_f_sum_interval / train_interval,
                                   epoch * len(train_data) + batch_idx)
 
                 loss_f_sum_interval = 0.0
