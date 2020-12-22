@@ -25,6 +25,7 @@ class NNUE(pl.LightningModule):
   """
   def __init__(self, feature_set, lambda_=1.0, learning_rate=1e-3, batch_per_epoch=None, config=None):
     super(NNUE, self).__init__()
+
     self.input = nn.Linear(feature_set.num_features, L1)
     self.feature_set = feature_set
     self.l1 = nn.Linear(2 * L1, L2)
@@ -41,6 +42,8 @@ class NNUE(pl.LightningModule):
       self.eps = config["eps"]
       self.weight_decay = config["weight_decay"]
       self.hparams.learning_rate = config["lr"]
+
+    self.save_hyperparameters()
 
     self._zero_virtual_feature_weights()
 
@@ -98,11 +101,12 @@ class NNUE(pl.LightningModule):
       raise Exception('Cannot change feature set from {} to {}.'.format(self.feature_set.name, new_feature_set.name))
 
   def forward(self, us, them, w_in, b_in):
+
     w = self.input(w_in)
     b = self.input(b_in)
     l0_ = (us * torch.cat([w, b], dim=1)) + (them * torch.cat([b, w], dim=1))
     # clamp here is used as a clipped relu to (0.0, 1.0)
-    l0_ = torch.clamp(l0_, 0.0, 1.0)
+    l0_ = torch.Clamp(l0_, 0.0, 1.0)
     l1_ = torch.clamp(self.l1(l0_), 0.0, 1.0)
     l2_ = torch.clamp(self.l2(l1_), 0.0, 1.0)
     x = self.output(l2_)
@@ -140,9 +144,9 @@ class NNUE(pl.LightningModule):
     self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
     return {"val_loss": loss}
 
-  def validation_epoch_end(self, outputs):
-    avg_loss = torch.stack([x["val_loss"] for x in outputs]).mean()
-    self.log("ptl/val_loss", avg_loss)
+  # def validation_epoch_end(self, outputs):
+  #   avg_loss = torch.stack([x["val_loss"] for x in outputs]).mean()
+  #   self.log("ptl/val_loss", avg_loss)
 
   def test_step(self, batch, batch_idx):
     return self.step_(batch, batch_idx, 'test_loss')
