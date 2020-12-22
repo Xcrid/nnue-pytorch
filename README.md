@@ -1,8 +1,11 @@
 # Setup
 ```
+Install MPI and NCCl
 python3 -m venv env
 source env/bin/activate
 pip install python-chess==0.31.4 pytorch-lightning torch "ray[tune]" torchvision
+HOROVOD_WITH_PYTORCH=1 HOROVOD_WITH_MPI=1 HOROVOD_WITHOUT_GLOO=1 HOROVOD_GPU_OPERATIONS=NCCL HOROVOD_NCCL_HOME=/path/to/nccl/ pip install horovod[pytorch]
+
 ```
 
 # Build the fast DataLoader
