@@ -126,7 +126,7 @@ def main():
     DECAY = 0.0
     EPS = 1e-16
 
-    writer = SummaryWriter('runs/nnue_experiment_1')
+    writer = SummaryWriter('logs/nnue_experiment_1')
 
     optimizer = ranger_adabelief.RangerAdaBelief(nnue.parameters(), lr=LEARNING_RATE, eps=EPS,
                                                  betas=(0.9, 0.999), weight_decay=DECAY)
@@ -160,7 +160,7 @@ def main():
 
             if batch_idx % train_interval == train_interval - 1:
 
-                writer.add_scalar('training loss',
+                writer.add_scalar('train_loss',
                                   loss_f_sum_interval / 1000,
                                   epoch * len(train_data) + batch_idx)
 
@@ -179,11 +179,11 @@ def main():
                     batch = [_data.cuda() for _data in batch]
                     us, them, white, black, outcome, score = batch
 
-                    _output, = nnue(us, them, white, black)
+                    _output = nnue(us, them, white, black)
                     loss_v = nnue_loss(_output, outcome, score, args.lambda_)
                     loss_v_sum_epoch += loss_v.float()
 
-            writer.add_scalar('validation loss',
+            writer.add_scalar('val_loss',
                               loss_v_sum_epoch / len(val_data),
                               epoch * len(train_data) + batch_idx)
 
