@@ -1,6 +1,6 @@
 # Setup
 ```
-Install MPI and NCCl
+Install MPI and NCCL
 python3 -m venv env
 source env/bin/activate
 pip install python-chess==0.31.4 pytorch-lightning torch "ray[tune]" torchvision
