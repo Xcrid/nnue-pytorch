@@ -126,7 +126,7 @@ def main():
     DECAY = 0.0
     EPS = 1e-16
 
-    writer = SummaryWriter('logs/nnue_experiment_1')
+    writer = SummaryWriter('logs/nnue_experiment_2')
 
     optimizer = ranger_adabelief.RangerAdaBelief(nnue.parameters(), lr=LEARNING_RATE, eps=EPS,
                                                  betas=(0.9, 0.999), weight_decay=DECAY)
@@ -138,7 +138,7 @@ def main():
 
         nnue.train()
 
-        train_interval = 50
+        train_interval = 100
         loss_f_sum_interval = 0.0
         loss_f_sum_epoch = 0.0
         loss_v_sum_epoch = 0.0
@@ -153,6 +153,7 @@ def main():
             loss = nnue_loss(output, outcome, score, args.lambda_)
 
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
             optimizer.step()
 
             loss_f_sum_interval += loss.float()
