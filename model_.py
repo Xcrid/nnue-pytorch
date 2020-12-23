@@ -4,9 +4,7 @@ from torch import nn
 import torch.nn.functional as F
 
 # 3 layer fully connected network
-L1 = 256
-L2 = 32
-L3 = 32
+
 
 class NNUE(nn.Module):
   """
@@ -17,8 +15,12 @@ class NNUE(nn.Module):
 
   It is not ideal for training a Pytorch quantized model directly.
   """
-  def __init__(self, feature_set, lambda_=1.0):
+  def __init__(self, feature_set, lambda_=1.0, s=s):
     super(NNUE, self).__init__()
+
+    L1 = 256 * s
+    L2 = 32 * s
+    L3 = 32 * s
 
     self.input = nn.Linear(feature_set.num_features, L1)
     self.feature_set = feature_set

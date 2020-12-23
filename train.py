@@ -109,7 +109,7 @@ def main():
                                     args.smart_fen_skipping, args.random_fen_skipping, 'cuda:0')
 
     if args.resume_from_model is None:
-        nnue = M.NNUE(feature_set=feature_set, lambda_=args.lambda_)
+        nnue = M.NNUE(feature_set=feature_set, lambda_=args.lambda_, s=1)
     else:
         nnue = torch.load(args.resume_from_model)
         nnue.set_feature_set(feature_set)
