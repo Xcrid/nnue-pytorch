@@ -126,7 +126,7 @@ def main():
     DECAY = 0.0
     EPS = 1e-16
 
-    writer = SummaryWriter('logs/nnue_experiment_6')
+    writer = SummaryWriter('logs/nnue_experiment_7')
 
     optimizer = ranger_adabelief.RangerAdaBelief(nnue.parameters(), lr=LEARNING_RATE, eps=EPS,
                                                  betas=(0.9, 0.999), weight_decay=DECAY)
