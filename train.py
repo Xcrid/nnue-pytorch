@@ -153,7 +153,7 @@ def main():
             loss = nnue_loss(output, outcome, score, args.lambda_)
 
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+            torch.nn.utils.clip_grad_norm_(nnue.parameters(), 0.5)
             optimizer.step()
 
             loss_f_sum_interval += loss.float()

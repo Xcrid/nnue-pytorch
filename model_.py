@@ -15,14 +15,15 @@ class NNUE(nn.Module):
 
   It is not ideal for training a Pytorch quantized model directly.
   """
-  def __init__(self, feature_set, lambda_=1.0, s=s):
+  def __init__(self, feature_set, lambda_=1.0, s=1):
     super(NNUE, self).__init__()
 
     L1 = 256 * s
     L2 = 32 * s
     L3 = 32 * s
 
-    self.input = nn.Linear(feature_set.num_features, L1)
+    self.input_white = nn.Linear(feature_set.num_features, L1)
+    self.input_black = nn.Linear(feature_set.num_features, L1)
     self.feature_set = feature_set
     self.l1 = nn.Linear(2 * L1, L2)
     self.l2 = nn.Linear(L2, L3)
@@ -41,10 +42,15 @@ class NNUE(nn.Module):
   at initialization - following the bell curve based on how many factors there are.
   '''
   def _zero_virtual_feature_weights(self):
-    weights = self.input.weight
+    weights = self.input_white.weight
     for a, b in self.feature_set.get_virtual_feature_ranges():
       weights[a:b, :] = 0.0
-    self.input.weight = nn.Parameter(weights)
+    self.input_white.weight = nn.Parameter(weights)
+
+    weights = self.input_black.weight
+    for a, b in self.feature_set.get_virtual_feature_ranges():
+      weights[a:b, :] = 0.0
+    self.input_black.weight = nn.Parameter(weights)
 
   '''
   This method attempts to convert the model from using the self.feature_set
@@ -87,8 +93,8 @@ class NNUE(nn.Module):
 
   def forward(self, us, them, w_in, b_in):
 
-    w = self.input(w_in)
-    b = self.input(b_in)
+    w = self.input_white(w_in)
+    b = self.input_black(b_in)
     l0_ = (us * torch.cat([w, b], dim=1)) + (them * torch.cat([b, w], dim=1))
     # clamp here is used as a clipped relu to (0.0, 1.0)
     l0_ = torch.clamp(l0_, 0.0, 1.0)
