@@ -12,6 +12,7 @@ import ranger_adabelief
 from torch.utils.tensorboard import SummaryWriter
 
 import horovod.torch as hvd
+import torch.multiprocessing as mp
 
 def data_loader_cc(train_filename, val_filename, feature_set, num_workers, batch_size, filtered, random_fen_skipping,
                    main_device, epoch_size=100000000, val_size=8000000):
@@ -24,11 +25,20 @@ def data_loader_cc(train_filename, val_filename, feature_set, num_workers, batch
                                                    random_fen_skipping=random_fen_skipping, device=main_device)
     # num_workers has to be 0 for sparse, and 1 for dense
     # it currently cannot work in parallel mode but it shouldn't need to
-    train = DataLoader(nnue_dataset.FixedNumBatchesDataset(train_infinite, (epoch_size + batch_size - 1) // batch_size),
-                       batch_size=None, batch_sampler=None)
-    val = DataLoader(nnue_dataset.FixedNumBatchesDataset(val_infinite, (val_size + batch_size - 1) // batch_size),
-                     batch_size=None, batch_sampler=None)
-    return train, val
+
+    train_dataset = nnue_dataset.FixedNumBatchesDataset(train_infinite, (epoch_size + batch_size - 1) // batch_size)
+    val_dataset = nnue_dataset.FixedNumBatchesDataset(val_infinite, (val_size + batch_size - 1) // batch_size)
+
+    train_sampler = torch.utils.data.distributed.DistributedSampler(
+        train_dataset, num_replicas=hvd.size(), rank=hvd.rank())
+
+    val_sampler = torch.utils.data.distributed.DistributedSampler(
+        val_dataset, num_replicas=hvd.size(), rank=hvd.rank())
+
+    train = DataLoader(train_dataset,batch_size=None, batch_sampler=None, sampler=train_sampler)
+    val = DataLoader(val_dataset,batch_size=None, batch_sampler=None, sampler=val_sampler)
+
+    return train, val, train_sampler, val_sampler
 
 
 def data_loader_py(train_filename, val_filename, batch_size, feature_set, main_device):
@@ -53,7 +63,33 @@ def nnue_loss(q, t, score, lambda_):
 def save_checkpoint(state, filename="save_test.pth"):
     torch.save(state, filename)
 
+def save_checkpoint(epoch):
+    if hvd.rank() == 0:
+        filepath = './checkpoint-{epoch}.pth.tar'.format(epoch=epoch + 1)
+        state = {
+            'model': nnue.state_dict(),
+            'optimizer': optimizer.state_dict(),
+        }
+        torch.save(state, filepath)
+
+# Horovod: average metrics from distributed training.
+class Metric(object):
+    def __init__(self, name):
+        self.name = name
+        self.sum = torch.tensor(0.)
+        self.n = torch.tensor(0.)
+
+    def update(self, val):
+        self.sum += hvd.allreduce(val.detach().cpu(), name=self.name)
+        self.n += 1
+
+    @property
+    def avg(self):
+        return self.sum / self.n
+
 def main():
+
+    torch.multiprocessing.freeze_support()
     parser = argparse.ArgumentParser(description="Trains the network.")
     parser.add_argument("train", help="Training data (.bin or .binpack)")
     parser.add_argument("val", help="Validation data (.bin or .binpack)")
@@ -107,7 +143,7 @@ def main():
 
     else:
         print('Using c++ data loader')
-        train_data, val_data = data_loader_cc(args.train, args.val, feature_set, args.num_workers, batch_size,
+        train_data, val_data, sampler = data_loader_cc(args.train, args.val, feature_set, args.num_workers, batch_size,
                                     args.smart_fen_skipping, args.random_fen_skipping, 'cuda:0')
 
     if args.resume_from_model is None:
@@ -122,28 +158,60 @@ def main():
     print("Num virtual features: {}".format(feature_set.num_virtual_features))
     print("Num features: {}".format(feature_set.num_features))
 
+    hvd.init()
+    verbose = 1 if hvd.rank() == 0 else 0
+    torch.set_num_threads(2)
+
+    kwargs = {'num_workers': 2, 'pin_memory': True} if True else {}
+    if (kwargs.get('num_workers', 0) > 0 and hasattr(mp, '_supports_context') and
+        mp._supports_context and 'forkserver' in mp.get_all_start_methods()):
+        kwargs['multiprocessing_context'] = 'forkserver'
+
+    torch.cuda.set_device(hvd.local_rank())
+
+    PASSES_PER_STEP = 4
+    ALLREDUCE_BATCH_SIZE = batch_size * PASSES_PER_STEP
+    USE_ADASUM = True
+    FP16_ALLREDUCE = False
+
     NUM_EPOCHS = 100
 
     LEARNING_RATE = 1e-3
     DECAY = 0.0
     EPS = 1e-16
 
-    writer = SummaryWriter('logs/nnue_experiment_2')
+    writer = SummaryWriter('logs/nnue_experiment_2') if hvd.rank() == 0 else None
+
+    nnue = nnue.cuda()
+
+    lr_scaler = PASSES_PER_STEP * hvd.size() if not USE_ADASUM else 1
+
+    if USE_ADASUM and hvd.nccl_built():
+        lr_scaler = PASSES_PER_STEP * hvd.local_size()
 
     optimizer = ranger_adabelief.RangerAdaBelief(nnue.parameters(), lr=LEARNING_RATE, eps=EPS,
                                                  betas=(0.9, 0.999), weight_decay=DECAY)
 
-    nnue = nnue.cuda()
+    compression = hvd.Compression.fp16 if FP16_ALLREDUCE else hvd.Compression.none
 
+    optimizer = hvd.DistributedOptimizer(optimizer,
+                                         named_parameters=nnue.named_parameters(),
+                                         compression=compression,
+                                         backward_passes_per_step=PASSES_PER_STEP,
+                                         op=hvd.AdaSum if USE_ADASUM else hvd.Average)
+
+    hvd.broadcast_parameters(nnue.state_dict(), root_rank=0)
 
     for epoch in range(0, NUM_EPOCHS):
+
+        train_sampler.set_epoch(epoch)
 
         nnue.train()
 
         train_interval = 100
-        loss_f_sum_interval = 0.0
-        loss_f_sum_epoch = 0.0
-        loss_v_sum_epoch = 0.0
+        loss_f_sum_interval = Metric('loss_f_sum_interval')
+        loss_f_sum_epoch = Metric('loss_f_sum_epoch')
+        loss_v_sum_epoch = Metric('loss_v_sum_epoch')
 
         for batch_idx, batch in enumerate(train_data):
             batch = [_data.cuda() for _data in batch]
@@ -158,18 +226,19 @@ def main():
             torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
             optimizer.step()
 
-            loss_f_sum_interval += loss.float()
-            loss_f_sum_epoch += loss.float()
+            loss_f_sum_interval.update(loss)
+            loss_f_sum_epoch.update(loss)
 
             if batch_idx % train_interval == train_interval - 1:
 
                 writer.add_scalar('train_loss',
-                                  loss_f_sum_interval / train_interval,
+                                  loss_f_sum_interval.avg / train_interval,
                                   epoch * len(train_data) + batch_idx)
 
-                loss_f_sum_interval = 0.0
+                loss_f_sum_interval = Metric('loss_f_sum_interval')
 
-        print("Epoch #{}\t Train_Loss: {:.8f}\t".format(epoch, loss_f_sum_epoch / len(train_data)))
+        if hvd.rank() == 0:
+            print("Epoch #{}\t Train_Loss: {:.8f}\t".format(epoch, loss_f_sum_epoch.avg / len(train_data)))
 
         if args.save:
             save_checkpoint({'name': epoch, 'state_dict': model.state_dict(), 'optimizer': optimizer.state_dict()})
@@ -184,16 +253,15 @@ def main():
 
                     _output = nnue(us, them, white, black)
                     loss_v = nnue_loss(_output, outcome, score, args.lambda_)
-                    loss_v_sum_epoch += loss_v.float()
+                    loss_v_sum_epoch.update(loss_v)
 
             writer.add_scalar('val_loss',
-                              loss_v_sum_epoch / len(val_data),
+                              loss_v_sum_epoch.avg.item() / len(val_data),
                               epoch * len(train_data) + batch_idx)
 
+            if hvd.rank() == 0:
 
-
-            print("Epoch #{}\tVal_Loss: {:.8f}\t".format(epoch, loss_v_sum_epoch / len(val_data)))
-            loss_v_sum_epoch = 0.0
+                print("Epoch #{}\tVal_Loss: {:.8f}\t".format(epoch, loss_v_sum_epoch.avg / len(val_data)))
 
     writer.close()
 
