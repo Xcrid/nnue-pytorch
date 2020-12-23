@@ -1,9 +1,11 @@
 import argparse
+import copy
 import model_ as M
 import nnue_dataset
 import nnue_bin_dataset
 import features
 import torch
+from torch import nn
 import torch.nn.functional as F
 from torch import set_num_threads as t_set_num_threads
 from torch.utils.data import DataLoader, Dataset
@@ -46,6 +48,14 @@ def nnue_loss(q, t, score, lambda_):
     result  = lambda_ * teacher_loss    + (1.0 - lambda_) * outcome_loss
     entropy = lambda_ * teacher_entropy + (1.0 - lambda_) * outcome_entropy
     loss = result.mean() - entropy.mean()
+    return loss
+
+
+def retrospective_loss(q, q_previous, score, loss_type):
+
+    k_retro = 2
+    p = (score / 600.0).sigmoid()
+    loss = (k_retro + 1) * loss_type(q, p) - k_retro * loss_type(q, q_previous)
     return loss
 
 def save_checkpoint(state, filename="save_test.pth"):
@@ -126,38 +136,64 @@ def main():
     DECAY = 0.0
     EPS = 1e-16
 
-    writer = SummaryWriter('logs/nnue_experiment_2')
+    writer = SummaryWriter('logs/nnue_experiment_5')
 
     optimizer = ranger_adabelief.RangerAdaBelief(nnue.parameters(), lr=LEARNING_RATE, eps=EPS,
                                                  betas=(0.9, 0.999), weight_decay=DECAY)
 
-    nnue = nnue.cuda()
+    L1 = nn.L1Loss()
 
+    warmup = 10000
+    iter_retrospection = 0
+    use_retrospection = False
+    loss_retrospection = None
+
+    nnue = nnue.cuda()
+    nnue_previous = None
 
     for epoch in range(0, NUM_EPOCHS):
 
         nnue.train()
 
-        train_interval = 100
+        train_interval = 50
         loss_f_sum_interval = 0.0
         loss_f_sum_epoch = 0.0
         loss_v_sum_epoch = 0.0
 
         for batch_idx, batch in enumerate(train_data):
+
+            if iter_retrospection >= warmup:
+                use_retrospection = True
+
+            if iter_retrospection >= 250 and use_retrospection:
+                nnue_previous = copy.deepcopy(nnue)
+                nnue_previous.eval()
+                iter_retrospection = 0
+
+            iter_retrospection += 1
+
             batch = [_data.cuda() for _data in batch]
             us, them, white, black, outcome, score = batch
 
             optimizer.zero_grad()
             output = nnue(us, them, white, black)
 
-            loss = nnue_loss(output, outcome, score, args.lambda_)
+            loss_nnue = nnue_loss(output, outcome, score, args.lambda_)
+
+            if use_retrospection:
+                with torch.no_grad():
+                    output_previous = nnue_previous(us, them, white, black)
+                    loss_retrospection = retrospective_loss(output, output_previous, score, L1)
+                loss = loss_nnue + loss_retrospection
+            else:
+                loss = loss_nnue
 
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+            torch.nn.utils.clip_grad_norm_(nnue.parameters(), 0.5)
             optimizer.step()
 
-            loss_f_sum_interval += loss.float()
-            loss_f_sum_epoch += loss.float()
+            loss_f_sum_interval += loss_nnue.float()
+            loss_f_sum_epoch += loss_nnue.float()
 
             if batch_idx % train_interval == train_interval - 1:
 
