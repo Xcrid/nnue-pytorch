@@ -15,12 +15,16 @@ class NNUE(nn.Module):
 
   It is not ideal for training a Pytorch quantized model directly.
   """
-  def __init__(self, feature_set, lambda_=1.0, s=s):
+  def __init__(self, feature_set, lambda_=1.0, s=1):
     super(NNUE, self).__init__()
 
     L1 = 256 * s
     L2 = 32 * s
     L3 = 32 * s
+
+    L1_small = 32 * s
+    L2_small = 16 * s
+    L3_small = 16 * s
 
     self.input = nn.Linear(feature_set.num_features, L1)
     self.feature_set = feature_set
@@ -28,6 +32,11 @@ class NNUE(nn.Module):
     self.l2 = nn.Linear(L2, L3)
     self.output = nn.Linear(L3, 1)
     self.lambda_ = lambda_
+
+    self.input_small = nn.Linear(feature_set.num_features, L1_small)
+    self.l1_small = nn.Linear(2 * L1_small, L2_small)
+    self.l2_small = nn.Linear(L2_small, L3_small)
+    self.output_small = nn.Linear(L3_small, 1)
 
 
     self._zero_virtual_feature_weights()
@@ -45,6 +54,11 @@ class NNUE(nn.Module):
     for a, b in self.feature_set.get_virtual_feature_ranges():
       weights[a:b, :] = 0.0
     self.input.weight = nn.Parameter(weights)
+
+    weights_small = self.input_small.weight
+    for a, b in self.feature_set.get_virtual_feature_ranges():
+      weights_small[a:b, :] = 0.0
+    self.input_small.weight = nn.Parameter(weights_small)
 
   '''
   This method attempts to convert the model from using the self.feature_set
@@ -95,7 +109,16 @@ class NNUE(nn.Module):
     l1_ = torch.clamp(self.l1(l0_), 0.0, 1.0)
     l2_ = torch.clamp(self.l2(l1_), 0.0, 1.0)
     x = self.output(l2_)
-    return x
+
+    w_small = self.input_small(w_in)
+    b_small = self.input_small(b_in)
+    l0_small_ = (us * torch.cat([w_small, b_small], dim=1)) + (them * torch.cat([b_small, w_small], dim=1))
+    # clamp here is used as a clipped relu to (0.0, 1.0)
+    l0_small_ = torch.clamp(l0_small_, 0.0, 1.0)
+    l1_small_ = torch.clamp(self.l1_small(l0_small_), 0.0, 1.0)
+    l2_small_ = torch.clamp(self.l2_small(l1_small_), 0.0, 1.0)
+    x_small = self.output_small(l2_small_)
+    return x, x_small
 
 
 

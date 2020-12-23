@@ -126,38 +126,48 @@ def main():
     DECAY = 0.0
     EPS = 1e-16
 
-    writer = SummaryWriter('logs/nnue_experiment_2')
+    writer = SummaryWriter('logs/nnue_experiment_6')
 
     optimizer = ranger_adabelief.RangerAdaBelief(nnue.parameters(), lr=LEARNING_RATE, eps=EPS,
                                                  betas=(0.9, 0.999), weight_decay=DECAY)
 
     nnue = nnue.cuda()
 
-
     for epoch in range(0, NUM_EPOCHS):
 
         nnue.train()
 
         train_interval = 100
+
         loss_f_sum_interval = 0.0
         loss_f_sum_epoch = 0.0
         loss_v_sum_epoch = 0.0
 
+        loss_f_sum_small_interval = 0.0
+        loss_f_sum_small_epoch = 0.0
+        loss_v_sum_small_epoch = 0.0
+
         for batch_idx, batch in enumerate(train_data):
+
             batch = [_data.cuda() for _data in batch]
             us, them, white, black, outcome, score = batch
 
             optimizer.zero_grad()
-            output = nnue(us, them, white, black)
+            output, output_small = nnue(us, them, white, black)
 
             loss = nnue_loss(output, outcome, score, args.lambda_)
+            loss_small = nnue_loss(output_small, outcome, score, args.lambda_)
 
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+            loss_total = loss + loss_small
+
+            loss_total.backward()
+            torch.nn.utils.clip_grad_norm_(nnue.parameters(), 0.5)
             optimizer.step()
 
             loss_f_sum_interval += loss.float()
             loss_f_sum_epoch += loss.float()
+            loss_f_sum_small_interval += loss.float()
+            loss_f_sum_small_epoch += loss.float()
 
             if batch_idx % train_interval == train_interval - 1:
 
@@ -165,7 +175,12 @@ def main():
                                   loss_f_sum_interval / train_interval,
                                   epoch * len(train_data) + batch_idx)
 
+                writer.add_scalar('train_loss_small',
+                                  loss_f_sum_small_interval / train_interval,
+                                  epoch * len(train_data) + batch_idx)
+
                 loss_f_sum_interval = 0.0
+                loss_f_sum_small_interval = 0.0
 
         print("Epoch #{}\t Train_Loss: {:.8f}\t".format(epoch, loss_f_sum_epoch / len(train_data)))
 
@@ -175,23 +190,30 @@ def main():
         if epoch % 1 == 0 or (epoch + 1) == NUM_EPOCHS:
 
             with torch.no_grad():
+
                 nnue.eval()
                 for batch_idx, batch in enumerate(val_data):
+
                     batch = [_data.cuda() for _data in batch]
                     us, them, white, black, outcome, score = batch
 
-                    _output = nnue(us, them, white, black)
+                    _output, _output_small = nnue(us, them, white, black)
+
                     loss_v = nnue_loss(_output, outcome, score, args.lambda_)
+                    loss_v_small = nnue_loss(_output_small, outcome, score, args.lambda_)
+
                     loss_v_sum_epoch += loss_v.float()
+                    loss_v_sum_small_epoch += loss_v_small.float()
 
             writer.add_scalar('val_loss',
                               loss_v_sum_epoch / len(val_data),
                               epoch * len(train_data) + batch_idx)
 
-
+            writer.add_scalar('val_loss_small',
+                              loss_v_sum_small_epoch / len(val_data),
+                              epoch * len(train_data) + batch_idx)
 
             print("Epoch #{}\tVal_Loss: {:.8f}\t".format(epoch, loss_v_sum_epoch / len(val_data)))
-            loss_v_sum_epoch = 0.0
 
     writer.close()
 
