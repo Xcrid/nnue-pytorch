@@ -166,8 +166,8 @@ def main():
 
             loss_f_sum_interval += loss.float()
             loss_f_sum_epoch += loss.float()
-            loss_f_sum_small_interval += loss.float()
-            loss_f_sum_small_epoch += loss.float()
+            loss_f_sum_small_interval += loss_small.float()
+            loss_f_sum_small_epoch += loss_small.float()
 
             if batch_idx % train_interval == train_interval - 1:
 
