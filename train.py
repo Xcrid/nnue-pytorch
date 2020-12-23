@@ -171,13 +171,10 @@ def main():
 
             if batch_idx % train_interval == train_interval - 1:
 
-                writer.add_scalar('train_loss',
-                                  loss_f_sum_interval / train_interval,
-                                  epoch * len(train_data) + batch_idx)
+                writer.add_scalars('TRAIN', {'train_loss': loss_f_sum_interval / train_interval,
+                                   'train_loss_small': loss_f_sum_small_interval / train_interval},
+                                   epoch * len(train_data) + batch_idx)
 
-                writer.add_scalar('train_loss_small',
-                                  loss_f_sum_small_interval / train_interval,
-                                  epoch * len(train_data) + batch_idx)
 
                 loss_f_sum_interval = 0.0
                 loss_f_sum_small_interval = 0.0
@@ -205,13 +202,9 @@ def main():
                     loss_v_sum_epoch += loss_v.float()
                     loss_v_sum_small_epoch += loss_v_small.float()
 
-            writer.add_scalar('val_loss',
-                              loss_v_sum_epoch / len(val_data),
-                              epoch * len(train_data) + batch_idx)
-
-            writer.add_scalar('val_loss_small',
-                              loss_v_sum_small_epoch / len(val_data),
-                              epoch * len(train_data) + batch_idx)
+            writer.add_scalars('VAL', {'val_loss': loss_v_sum_epoch / len(val_data),
+                                       'val_loss_small': loss_v_sum_small_epoch / len(val_data)},
+                                        epoch * len(train_data) + batch_idx)
 
             print("Epoch #{}\tVal_Loss: {:.8f}\t".format(epoch, loss_v_sum_epoch / len(val_data)))
 
