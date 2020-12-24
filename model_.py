@@ -97,5 +97,25 @@ class NNUE(nn.Module):
     x = self.output(l2_)
     return x
 
+  def get_1xlr(self):
 
+    list = [module for module in self.children()]
+
+    for i in list:
+        if i == self.input:
+          if isinstance(i, nn.Linear):
+            for p in i.parameters():
+              if p.requires_grad:
+                yield p
+
+  def get_10xlr(self):
+
+    list = [module for module in self.children()]
+
+    for i in list:
+        if i != self.input:
+          if isinstance(i, nn.Linear):
+            for p in i.parameters():
+              if p.requires_grad:
+                yield p
 

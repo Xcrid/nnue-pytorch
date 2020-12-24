@@ -11,9 +11,10 @@ from torch.utils.data import DataLoader, Dataset
 
 import ranger_adabelief
 from torch.utils.tensorboard import SummaryWriter
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 def data_loader_cc(train_filename, val_filename, feature_set, num_workers, batch_size, filtered, random_fen_skipping,
-                   main_device, epoch_size=100000000, val_size=8000000):
+                   main_device, epoch_size=100000000, val_size=10000000):
     # Epoch and validation sizes are arbitrary
     features_name = feature_set.name
     train_infinite = nnue_dataset.SparseBatchDataset(features_name, train_filename, batch_size, num_workers=num_workers,
@@ -50,7 +51,7 @@ def nnue_loss(q, t, score, lambda_):
     return loss
 
 def save_ckp(state, checkpoint_dir):
-    f_path = checkpoint_dir / 'best_model.pt'
+    f_path = checkpoint_dir + 'best_model.pt'
     torch.save(state, f_path)
 
 def load_ckp(checkpoint_fpath, model, optimizer):
@@ -66,7 +67,7 @@ def main():
 
     parser.add_argument("--tune", action="store_true", help="automated LR search")
     parser.add_argument("--save", action="store_true", help="save after every training epoch (default = False)")
-    parser.add_argument("--experiment-id", default="1", type=str, help="specify the experiment id")
+    parser.add_argument("--experiment", default="1", type=str, help="specify the experiment id")
     parser.add_argument("--py-data", action="store_true", help="Use python data loader (default=False)")
     parser.add_argument("--lambda", default=1.0, type=float, dest='lambda_',
                         help="lambda=1.0 = train on evaluations, lambda=0.0 = train on game results, interpolates between (default=1.0).")
@@ -123,27 +124,37 @@ def main():
     print("Num features: {}".format(feature_set.num_features))
 
     START_EPOCH = 0
-    NUM_EPOCHS = 100
+    NUM_EPOCHS = 120
 
     LEARNING_RATE = 1e-3
     DECAY = 0.0
     EPS = 1e-16
 
     best_loss = 1000
+    is_best = False
 
-    summary_location = 'logs/nnue_experiment_' + args.experiment-id
-    save_location = '/home/esigelec/PycharmProjects/nnue-pytorch/save_models/' + args.experiment-id
+    summary_location = 'logs/nnue_experiment_' + args.experiment
+    save_location = '/home/esigelec/PycharmProjects/nnue-pytorch/save_models/' + args.experiment
 
     writer = SummaryWriter(summary_location)
 
     nnue = M.NNUE(feature_set=feature_set, lambda_=args.lambda_, s=1)
 
-    optimizer = ranger_adabelief.RangerAdaBelief(nnue.parameters(), lr=LEARNING_RATE, eps=EPS,
+    train_params = [{'params': nnue.get_1xlr(), 'lr': LEARNING_RATE},
+                    {'params': nnue.get_10xlr(), 'lr': LEARNING_RATE * 10}]
+
+    optimizer = ranger_adabelief.RangerAdaBelief(train_params, lr=LEARNING_RATE, eps=EPS,
                                                  betas=(0.9, 0.999), weight_decay=DECAY)
+
+    scheduler = ReduceLROnPlateau(optimizer, patience=0, min_lr=1e-6)
 
     if args.resume_from_model is not None:
         nnue, optimizer, start_epoch = load_ckp(args.resume_from_model, nnue, optimizer)
         nnue.set_feature_set(feature_set)
+        for state in optimizer.state.values():
+           for k, v in state.items():
+               if isinstance(v, torch.Tensor):
+                   state[k] = v.cuda()
 
     nnue = nnue.cuda()
 
@@ -194,20 +205,23 @@ def main():
                     loss_v = nnue_loss(_output, outcome, score, args.lambda_)
                     loss_v_sum_epoch += loss_v.float()
 
+            scheduler.step(loss_v_sum_epoch / len(val_data))
             writer.add_scalar('val_loss',
                               loss_v_sum_epoch / len(val_data),
                               epoch * len(train_data) + batch_idx)
 
             if loss_v_sum_epoch / len(val_data) <= best_loss:
                 best_loss = loss_v_sum_epoch / len(val_data)
+                is_best = True
 
-                if args.save or epoch + 1 == NUM_EPOCHS:
-                    checkpoint = {
-                        'epoch': epoch + 1,
-                        'state_dict': nnue.state_dict(),
-                        'optimizer': optimizer.state_dict()
-                    }
-                    save_ckp(checkpoint, save_location)
+            if is_best:
+                checkpoint = {
+                    'epoch': epoch + 1,
+                    'state_dict': nnue.state_dict(),
+                    'optimizer': optimizer.state_dict()
+                }
+                save_ckp(checkpoint, save_location)
+                is_best = False
 
             print("Epoch #{}\tVal_Loss: {:.8f}\t".format(epoch, loss_v_sum_epoch / len(val_data)))
 
