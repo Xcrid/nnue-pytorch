@@ -1,4 +1,5 @@
 import argparse
+import shutil
 import model_ as M
 import nnue_dataset
 import nnue_bin_dataset
@@ -48,8 +49,15 @@ def nnue_loss(q, t, score, lambda_):
     loss = result.mean() - entropy.mean()
     return loss
 
-def save_checkpoint(state, filename="save_test.pth"):
-    torch.save(state, filename)
+def save_ckp(state, checkpoint_dir):
+    f_path = checkpoint_dir / 'best_model.pt'
+    torch.save(state, f_path)
+
+def load_ckp(checkpoint_fpath, model, optimizer):
+    checkpoint = torch.load(checkpoint_fpath)
+    model.load_state_dict(checkpoint['state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer'])
+    return model, optimizer, checkpoint['epoch']
 
 def main():
     parser = argparse.ArgumentParser(description="Trains the network.")
@@ -58,6 +66,7 @@ def main():
 
     parser.add_argument("--tune", action="store_true", help="automated LR search")
     parser.add_argument("--save", action="store_true", help="save after every training epoch (default = False)")
+    parser.add_argument("--experiment-id", default="1", type=str, help="specify the experiment id")
     parser.add_argument("--py-data", action="store_true", help="Use python data loader (default=False)")
     parser.add_argument("--lambda", default=1.0, type=float, dest='lambda_',
                         help="lambda=1.0 = train on evaluations, lambda=0.0 = train on game results, interpolates between (default=1.0).")
@@ -108,33 +117,37 @@ def main():
         train_data, val_data = data_loader_cc(args.train, args.val, feature_set, args.num_workers, batch_size,
                                     args.smart_fen_skipping, args.random_fen_skipping, 'cuda:0')
 
-    if args.resume_from_model is None:
-        nnue = M.NNUE(feature_set=feature_set, lambda_=args.lambda_, s=1)
-    else:
-        nnue = torch.load(args.resume_from_model)
-        nnue.set_feature_set(feature_set)
-        nnue.lambda_ = args.lambda_
-
     print("Feature set: {}".format(feature_set.name))
     print("Num real features: {}".format(feature_set.num_real_features))
     print("Num virtual features: {}".format(feature_set.num_virtual_features))
     print("Num features: {}".format(feature_set.num_features))
 
+    START_EPOCH = 0
     NUM_EPOCHS = 100
 
     LEARNING_RATE = 1e-3
     DECAY = 0.0
     EPS = 1e-16
 
-    writer = SummaryWriter('logs/nnue_experiment_2')
+    best_loss = 1000
+
+    summary_location = 'logs/nnue_experiment_' + args.experiment-id
+    save_location = '/home/esigelec/PycharmProjects/nnue-pytorch/save_models/' + args.experiment-id
+
+    writer = SummaryWriter(summary_location)
+
+    nnue = M.NNUE(feature_set=feature_set, lambda_=args.lambda_, s=1)
 
     optimizer = ranger_adabelief.RangerAdaBelief(nnue.parameters(), lr=LEARNING_RATE, eps=EPS,
                                                  betas=(0.9, 0.999), weight_decay=DECAY)
 
+    if args.resume_from_model is not None:
+        nnue, optimizer, start_epoch = load_ckp(args.resume_from_model, nnue, optimizer)
+        nnue.set_feature_set(feature_set)
+
     nnue = nnue.cuda()
 
-
-    for epoch in range(0, NUM_EPOCHS):
+    for epoch in range(START_EPOCH, NUM_EPOCHS):
 
         nnue.train()
 
@@ -169,9 +182,6 @@ def main():
 
         print("Epoch #{}\t Train_Loss: {:.8f}\t".format(epoch, loss_f_sum_epoch / len(train_data)))
 
-        if args.save:
-            save_checkpoint({'name': epoch, 'state_dict': model.state_dict(), 'optimizer': optimizer.state_dict()})
-
         if epoch % 1 == 0 or (epoch + 1) == NUM_EPOCHS:
 
             with torch.no_grad():
@@ -188,10 +198,18 @@ def main():
                               loss_v_sum_epoch / len(val_data),
                               epoch * len(train_data) + batch_idx)
 
+            if loss_v_sum_epoch / len(val_data) <= best_loss:
+                best_loss = loss_v_sum_epoch / len(val_data)
 
+                if args.save or epoch + 1 == NUM_EPOCHS:
+                    checkpoint = {
+                        'epoch': epoch + 1,
+                        'state_dict': nnue.state_dict(),
+                        'optimizer': optimizer.state_dict()
+                    }
+                    save_ckp(checkpoint, save_location)
 
             print("Epoch #{}\tVal_Loss: {:.8f}\t".format(epoch, loss_v_sum_epoch / len(val_data)))
-            loss_v_sum_epoch = 0.0
 
     writer.close()
 
