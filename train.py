@@ -9,7 +9,11 @@ import torch.nn.functional as F
 from torch import set_num_threads as t_set_num_threads
 from torch.utils.data import DataLoader, Dataset
 
+from torch import nn
+import copy
+
 import ranger_adabelief
+import ranger
 from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
@@ -128,10 +132,14 @@ def main():
 
     LEARNING_RATE = 1e-3
     DECAY = 0.0
-    EPS = 1e-16
+    EPS = 1e-8
 
     best_loss = 1000
     is_best = False
+
+    early_stopping_delay = 10
+    early_stopping_count = 0
+    early_stopping_flag = False
 
     summary_location = 'logs/nnue_experiment_' + args.experiment
     save_location = '/home/esigelec/PycharmProjects/nnue-pytorch/save_models/' + args.experiment
@@ -141,12 +149,9 @@ def main():
     nnue = M.NNUE(feature_set=feature_set, lambda_=args.lambda_, s=1)
 
     train_params = [{'params': nnue.get_1xlr(), 'lr': LEARNING_RATE},
-                    {'params': nnue.get_10xlr(), 'lr': LEARNING_RATE * 10}]
+                    {'params': nnue.get_10xlr(), 'lr': LEARNING_RATE}]
 
-    optimizer = ranger_adabelief.RangerAdaBelief(train_params, lr=LEARNING_RATE, eps=EPS,
-                                                 betas=(0.9, 0.999), weight_decay=DECAY)
-
-    scheduler = ReduceLROnPlateau(optimizer, patience=0, min_lr=1e-6)
+    optimizer = ranger.Ranger(nnue.parameters(),lr=LEARNING_RATE, eps=EPS, betas=(0.9, 0.999), weight_decay=DECAY)
 
     if args.resume_from_model is not None:
         nnue, optimizer, start_epoch = load_ckp(args.resume_from_model, nnue, optimizer)
@@ -167,7 +172,12 @@ def main():
         loss_f_sum_epoch = 0.0
         loss_v_sum_epoch = 0.0
 
+        if early_stopping_flag:
+            print("early end of training at epoch" + str(epoch))
+            break
+
         for batch_idx, batch in enumerate(train_data):
+
             batch = [_data.cuda() for _data in batch]
             us, them, white, black, outcome, score = batch
 
@@ -205,7 +215,6 @@ def main():
                     loss_v = nnue_loss(_output, outcome, score, args.lambda_)
                     loss_v_sum_epoch += loss_v.float()
 
-            scheduler.step(loss_v_sum_epoch / len(val_data))
             writer.add_scalar('val_loss',
                               loss_v_sum_epoch / len(val_data),
                               epoch * len(train_data) + batch_idx)
@@ -213,6 +222,12 @@ def main():
             if loss_v_sum_epoch / len(val_data) <= best_loss:
                 best_loss = loss_v_sum_epoch / len(val_data)
                 is_best = True
+                early_stopping_count = 0
+            else:
+                early_stopping_count += 1
+                if early_stopping_delay == early_stopping_count:
+                    early_stopping_flag = True
+
 
             if is_best:
                 checkpoint = {
