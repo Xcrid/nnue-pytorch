@@ -2,7 +2,8 @@ import chess
 import torch
 from torch import nn
 import torch.nn.functional as F
-
+from torch.quantization import QuantStub, DeQuantStub
+from torch.nn.quantized import FloatFunctional
 # 3 layer fully connected network
 
 
@@ -23,12 +24,20 @@ class NNUE(nn.Module):
     L3 = 32 * s
 
     self.input = nn.Linear(feature_set.num_features, L1)
+    self.R0 = nn.ReLU()
     self.feature_set = feature_set
     self.l1 = nn.Linear(2 * L1, L2)
+    self.R1 = nn.ReLU()
     self.l2 = nn.Linear(L2, L3)
+    self.R2 = nn.ReLU()
     self.output = nn.Linear(L3, 1)
     self.lambda_ = lambda_
 
+    self.quant = QuantStub()
+    self.dequant = DeQuantStub()
+
+    self.input_mul = FloatFunctional()
+    self.input_add = FloatFunctional()
 
     self._zero_virtual_feature_weights()
 
@@ -87,14 +96,23 @@ class NNUE(nn.Module):
 
   def forward(self, us, them, w_in, b_in):
 
+    us = self.quant(us)
+    them = self.quant(them)
+    w_in = self.quant(w_in)
+    b_in = self.quant(b_in)
+
     w = self.input(w_in)
     b = self.input(b_in)
-    l0_ = (us * torch.cat([w, b], dim=1)) + (them * torch.cat([b, w], dim=1))
-    # clamp here is used as a clipped relu to (0.0, 1.0)
-    l0_ = torch.clamp(l0_, 0.0, 1.0)
-    l1_ = torch.clamp(self.l1(l0_), 0.0, 1.0)
-    l2_ = torch.clamp(self.l2(l1_), 0.0, 1.0)
+    l0_ = self.input_add.add(self.input_mul.mul(us, torch.cat([w, b], dim=1)),
+                             self.input_mul.mul(them, torch.cat([b, w], dim=1)))
+
+    l0_ = self.R0(l0_)
+    l1_ = self.R1(self.l1(l0_))
+    l2_ = self.R2(self.l2(l1_))
     x = self.output(l2_)
+
+    x = self.dequant(x)
+
     return x
 
   def get_1xlr(self):

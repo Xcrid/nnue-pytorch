@@ -16,6 +16,7 @@ import ranger_adabelief
 import ranger
 from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from quantizer import NNUEQuantizedWriter
 
 def data_loader_cc(train_filename, val_filename, feature_set, num_workers, batch_size, filtered, random_fen_skipping,
                    main_device, epoch_size=100000000, val_size=10000000):
@@ -161,6 +162,18 @@ def main():
                if isinstance(v, torch.Tensor):
                    state[k] = v.cuda()
 
+    ###### CPU without VNNI support requires the reduce_range option when using fbgemm to avoid overflow on activations
+    #### Pytorch enforces fbgemm with reduce_range in the source code
+    nnue.train()
+    nnue.qconfig = torch.quantization.get_default_qat_qconfig('fbgemm')
+    fuse_layers = [
+        ['input', 'R0'],
+        ['l1', 'R1'],
+        ['l2', 'R2'],
+    ]
+    torch.quantization.fuse_modules(nnue, fuse_layers)
+    nnue = torch.quantization.prepare_qat(nnue)
+
     nnue = nnue.cuda()
 
     for epoch in range(START_EPOCH, NUM_EPOCHS):
@@ -171,6 +184,10 @@ def main():
         loss_f_sum_interval = 0.0
         loss_f_sum_epoch = 0.0
         loss_v_sum_epoch = 0.0
+
+        if epoch >= 110:
+            # Freeze quantizer parameters
+            nnue.apply(torch.quantization.disable_observer)
 
         if early_stopping_flag:
             print("early end of training at epoch" + str(epoch))
@@ -239,6 +256,13 @@ def main():
                 is_best = False
 
             print("Epoch #{}\tVal_Loss: {:.8f}\t".format(epoch, loss_v_sum_epoch / len(val_data)))
+
+    nnue.eval()
+    nnue_int8 = torch.quantization.convert(nnue)
+
+    writer = NNUEQuantizedWriter(nnue_int8)
+    with open('quantized.nnue', 'wb') as f:
+        f.write(writer.buf)
 
     writer.close()
 
