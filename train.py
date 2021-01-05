@@ -128,16 +128,16 @@ def main():
     print("Num features: {}".format(feature_set.num_features))
 
     START_EPOCH = 0
-    NUM_EPOCHS = 120
+    NUM_EPOCHS = 300
 
-    LEARNING_RATE = 1e-3
-    DECAY = 0.0
+    LEARNING_RATE = 5e-4
+    DECAY = 0
     EPS = 1e-8
 
     best_loss = 1000
     is_best = False
 
-    early_stopping_delay = 10
+    early_stopping_delay = 30
     early_stopping_count = 0
     early_stopping_flag = False
 
@@ -149,12 +149,14 @@ def main():
     nnue = M.NNUE(feature_set=feature_set, lambda_=args.lambda_, s=1)
 
     train_params = [{'params': nnue.get_1xlr(), 'lr': LEARNING_RATE},
-                    {'params': nnue.get_10xlr(), 'lr': LEARNING_RATE}]
+                    {'params': nnue.get_10xlr(), 'lr': LEARNING_RATE * 10.0}]
 
-    optimizer = ranger.Ranger(nnue.parameters(),lr=LEARNING_RATE, eps=EPS, betas=(0.9, 0.999), weight_decay=DECAY)
+    optimizer = ranger.Ranger(train_params,lr=LEARNING_RATE, eps=EPS, betas=(0.9, 0.999), weight_decay=DECAY)
+
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=7, cooldown=1, min_lr=1e-7, verbose=True)
 
     if args.resume_from_model is not None:
-        nnue, optimizer, start_epoch = load_ckp(args.resume_from_model, nnue, optimizer)
+        nnue, optimizer, START_EPOCH = load_ckp(args.resume_from_model, nnue, optimizer)
         nnue.set_feature_set(feature_set)
         for state in optimizer.state.values():
            for k, v in state.items():
@@ -163,7 +165,7 @@ def main():
 
     nnue = nnue.cuda()
 
-    for epoch in range(START_EPOCH, NUM_EPOCHS):
+    for epoch in range(START_EPOCH, NUM_EPOCHS + START_EPOCH):
 
         nnue.train()
 
@@ -214,6 +216,8 @@ def main():
                     _output = nnue(us, them, white, black)
                     loss_v = nnue_loss(_output, outcome, score, args.lambda_)
                     loss_v_sum_epoch += loss_v.float()
+
+            scheduler.step(loss_v_sum_epoch / len(val_data))
 
             writer.add_scalar('val_loss',
                               loss_v_sum_epoch / len(val_data),
