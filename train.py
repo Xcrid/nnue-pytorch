@@ -171,7 +171,7 @@ def main():
                    state[k] = v.cuda()
     
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=7, cooldown=1, min_lr=1e-7, verbose=True)
-    swa_scheduler = SWALR(optimizer, swa_lr=[1e-5, 1e-5])
+    swa_scheduler = SWALR(optimizer, annealing_epochs=5, swa_lr=[5e-5, 1e-4])
 
     nnue = nnue.cuda()
     swa_nnue = AveragedModel(nnue)
