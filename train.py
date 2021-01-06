@@ -8,6 +8,8 @@ import torch
 import torch.nn.functional as F
 from torch import set_num_threads as t_set_num_threads
 from torch.utils.data import DataLoader, Dataset
+from torch.optim.swa_utils import AveragedModel, SWALR
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from torch import nn
 import copy
@@ -43,7 +45,12 @@ def data_loader_py(train_filename, val_filename, batch_size, feature_set, main_d
 
 def nnue_loss(q, t, score, lambda_):
 
-    p = (score / 600.0).sigmoid()
+    nnue2score = 600
+    scaling = 361
+
+    q = q * nnue2score / scaling
+    p = (score / scaling).sigmoid()
+
     epsilon = 1e-12
     teacher_entropy = -(p * (p + epsilon).log() + (1.0 - p) * (1.0 - p + epsilon).log())
     outcome_entropy = -(t * (t + epsilon).log() + (1.0 - t) * (1.0 - t + epsilon).log())
@@ -54,8 +61,8 @@ def nnue_loss(q, t, score, lambda_):
     loss = result.mean() - entropy.mean()
     return loss
 
-def save_ckp(state, checkpoint_dir):
-    f_path = checkpoint_dir + 'best_model.pt'
+def save_ckp(state, checkpoint_dir, name='best_model.pt'):
+    f_path = checkpoint_dir + name
     torch.save(state, f_path)
 
 def load_ckp(checkpoint_fpath, model, optimizer):
@@ -128,11 +135,12 @@ def main():
     print("Num features: {}".format(feature_set.num_features))
 
     START_EPOCH = 0
-    NUM_EPOCHS = 300
+    NUM_EPOCHS = 150
+    SWA_START = int(0.75 * NUM_EPOCHS)
 
     LEARNING_RATE = 5e-4
     DECAY = 0
-    EPS = 1e-8
+    EPS = 1e-7
 
     best_loss = 1000
     is_best = False
@@ -153,7 +161,6 @@ def main():
 
     optimizer = ranger.Ranger(train_params,lr=LEARNING_RATE, eps=EPS, betas=(0.9, 0.999), weight_decay=DECAY)
 
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=7, cooldown=1, min_lr=1e-7, verbose=True)
 
     if args.resume_from_model is not None:
         nnue, optimizer, START_EPOCH = load_ckp(args.resume_from_model, nnue, optimizer)
@@ -162,10 +169,14 @@ def main():
            for k, v in state.items():
                if isinstance(v, torch.Tensor):
                    state[k] = v.cuda()
+    
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=7, cooldown=1, min_lr=1e-7, verbose=True)
+    swa_scheduler = SWALR(optimizer, swa_lr=[1e-5, 1e-5])
 
     nnue = nnue.cuda()
+    swa_nnue = AveragedModel(nnue)
 
-    for epoch in range(START_EPOCH, NUM_EPOCHS + START_EPOCH):
+    for epoch in range(START_EPOCH, NUM_EPOCHS):
 
         nnue.train()
 
@@ -216,33 +227,59 @@ def main():
                     _output = nnue(us, them, white, black)
                     loss_v = nnue_loss(_output, outcome, score, args.lambda_)
                     loss_v_sum_epoch += loss_v.float()
-
-            scheduler.step(loss_v_sum_epoch / len(val_data))
+                    
+            if epoch > SWA_START:
+            	print("swa_mode")
+            	swa_nnue.update_parameters(nnue)
+            	swa_scheduler.step()
+            	checkpoint = {
+	            'epoch': epoch + 1,
+	            'state_dict': swa_nnue.state_dict(),
+	            'optimizer': optimizer.state_dict()
+	        }
+            	save_ckp(checkpoint, save_location, 'swa_nnue.pt')
+            
+            else:
+	    
+            	scheduler.step(loss_v_sum_epoch / len(val_data))
+            	
+            	if loss_v_sum_epoch / len(val_data) <= best_loss:
+                       best_loss = loss_v_sum_epoch / len(val_data)
+                       is_best = True
+                       early_stopping_count = 0
+            	else:
+                       early_stopping_count += 1
+            	if early_stopping_delay == early_stopping_count:
+                       early_stopping_flag = True
+			
+            	if is_best:
+                       checkpoint = {
+		            'epoch': epoch + 1,
+		            'state_dict': nnue.state_dict(),
+		            'optimizer': optimizer.state_dict()
+		        }
+                       save_ckp(checkpoint, save_location)
+                       is_best = False
 
             writer.add_scalar('val_loss',
-                              loss_v_sum_epoch / len(val_data),
-                              epoch * len(train_data) + batch_idx)
-
-            if loss_v_sum_epoch / len(val_data) <= best_loss:
-                best_loss = loss_v_sum_epoch / len(val_data)
-                is_best = True
-                early_stopping_count = 0
-            else:
-                early_stopping_count += 1
-                if early_stopping_delay == early_stopping_count:
-                    early_stopping_flag = True
-
-
-            if is_best:
-                checkpoint = {
-                    'epoch': epoch + 1,
-                    'state_dict': nnue.state_dict(),
-                    'optimizer': optimizer.state_dict()
-                }
-                save_ckp(checkpoint, save_location)
-                is_best = False
+	                      loss_v_sum_epoch / len(val_data),
+	                      epoch * len(train_data) + batch_idx)
 
             print("Epoch #{}\tVal_Loss: {:.8f}\t".format(epoch, loss_v_sum_epoch / len(val_data)))
+            
+    loss_v_sum_epoch = 0.0
+    
+    with torch.no_grad():
+        swa_nnue.eval()
+        for batch_idx, batch in enumerate(val_data):
+            batch = [_data.cuda() for _data in batch]
+            us, them, white, black, outcome, score = batch
+
+            _output = swa_nnue(us, them, white, black)
+            loss_v = nnue_loss(_output, outcome, score, args.lambda_)
+            loss_v_sum_epoch += loss_v.float()
+	    
+    print("Val_Loss: {:.8f}\t".format(loss_v_sum_epoch / len(val_data)))
 
     writer.close()
 
